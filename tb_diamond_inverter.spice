@@ -1,4 +1,4 @@
-* tb_diamond_inverter.spice
+* tb_diamond_inverter.spice - Édney Freitas
 * Open Analog - DIAMOND Testbench (Dual Mode: SCH + PEX)
 * Technology: IHP SG13G2 (1.2V Core) | Target: ngspice-45
 *
