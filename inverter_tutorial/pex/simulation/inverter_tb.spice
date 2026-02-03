@@ -1,0 +1,21 @@
+** sch_path: /home/jsmoya07/Documents/inverter_tutorial/pex/inverter_tb.sch
+**.subckt inverter_tb
+C1 Vout VSS 100f m=1
+V1 VSS GND 0
+V2 VDD VSS 1.5
+V3 Vin VSS 1.5
+x1 VDD Vout Vin VSS inverter
+**** begin user architecture code
+ .lib cornerMOSlv.lib mos_tt
+
+
+
+.include /home/jsmoya07/Documents/inverter_tutorial/pex/inverter.spice
+.dc V3 0 1.5 0.01
+.save all
+
+
+**** end user architecture code
+**.ends
+.GLOBAL GND
+.end

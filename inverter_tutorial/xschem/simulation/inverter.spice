@@ -1,0 +1,7 @@
+** sch_path: /home/jsmoya07/Documents/inverter_tutorial/xschem/inverter.sch
+.subckt inverter VDD Vout Vin VSS
+*.PININFO Vin:I VDD:B Vout:B VSS:B
+M1 Vout Vin VSS VSS sg13_lv_nmos w=1u l=0.13u ng=1 m=1
+M2 Vout Vin VDD VDD sg13_lv_pmos w=3u l=0.13u ng=1 m=1
+.ends
+.end

@@ -1,0 +1,250 @@
+* tb_diamond_inverter.spice
+* Open Analog - DIAMOND Testbench (Dual Mode: SCH + PEX)
+* Technology: IHP SG13G2 (1.2V Core) | Target: ngspice-45
+*
+* Purpose:
+* - Provide a robust, repeatable baseline to characterize a standard-cell-like inverter
+*   across VDD scaling and temperature, producing a machine-readable summary.csv.
+*
+* Design philosophy:
+* - One CORNER per execution (avoids model redefinition / corner reload pitfalls)
+* - Wrapper shielding (pin-order stability between SCH and PEX)
+* - Full data persistence (unique filenames; never overwrite silently)
+*
+* Run:
+*   rm -rf results run_gold.log
+*   ngspice -b -o run_gold.log tb_diamond_inverter.spice
+*
+*****************************************************
+* 0) GLOBALS
+*****************************************************
+.GLOBAL GND
+
+*****************************************************
+* 1) USER CONFIG
+*****************************************************
+* Simulation mode:
+*   0 = Schematic (Xschem)  | 1 = PEX (Magic/KLayout)
+.param SIM_MODE    = 0
+.csparam mode_flag = {SIM_MODE}
+
+* Corner selection (one per run): 0=TT, 1=SS, 2=FF
+.param CORNER_IDX  = 0
+.csparam corn_flag = {CORNER_IDX}
+
+* Nominal supply & load
+.param VDD_NOM     = 1.2
+.param VDD         = {VDD_NOM}
+.param CLOAD       = 100f
+
+* Input PULSE params
+.param TD=1n TR=100p TF=100p PW=10n PER=20n
+
+*****************************************************
+* 2) PDK / MODELS (one corner per run)
+*****************************************************
+.if (CORNER_IDX == 0)
+  .lib cornerMOSlv.lib mos_tt
+.elseif (CORNER_IDX == 1)
+  .lib cornerMOSlv.lib mos_ss
+.else
+  .lib cornerMOSlv.lib mos_ff
+.endif
+
+*****************************************************
+* 3) DUT INCLUDE & WRAPPER
+*****************************************************
+* NOTE: SIM_MODE is evaluated at NETLIST PARSE TIME.
+*       Do NOT try to sweep SIM_MODE inside .control.
+.if (SIM_MODE == 0)
+  .include ./inverter_tutorial/xschem/inverter.spice
+.else
+  .include ./inverter_tutorial/pex/inverter.spice
+.endif
+
+* Wrapper: shields pin order (DUT expects: inverter VDD Vout Vin VSS)
+.subckt DUT_WRAPPER VDD VIN VOUT VSS
+  XU_CORE VDD VOUT VIN VSS inverter
+.ends DUT_WRAPPER
+
+*****************************************************
+* 4) TESTBENCH
+*****************************************************
+* Local ground reference
+VSSS  VSS 0 0
+VDDs  VDD VSS {VDD}
+
+* DC source used as sweep handle (Vin is referenced to Vin_bias)
+VBIAS Vin_bias VSS DC 0
+VDRV  Vin Vin_bias DC 0 AC 1 PULSE(0 {VDD} {TD} {TR} {TF} {PW} {PER})
+
+* Load and DUT
+C1    Vout VSS {CLOAD}
+XU1   VDD Vin Vout VSS DUT_WRAPPER
+
+*****************************************************
+* 5) CONTROL BLOCK
+*****************************************************
+.control
+  set noaskquit
+  set filetype=binary
+  option numdgt=6
+
+  shell mkdir -p results
+
+  * Tag run metadata
+  if $&mode_flag = 0
+     set mode_name = "sch"
+  else
+     set mode_name = "pex"
+  end
+
+  if $&corn_flag = 0
+     set cname = "TT"
+  end
+  if $&corn_flag = 1
+     set cname = "SS"
+  end
+  if $&corn_flag = 2
+     set cname = "FF"
+  end
+
+  * Output headers
+  echo "mode,corner,vdd_V,temp_C,VOH_V,VOL_V,VSW_V,VIL_V,VIH_V,trise_s,tfall_s,tPHL_s,tPLH_s,A0_dB,UGF_Hz,BW3dB_Hz,PASS" > results/summary.csv
+  echo "mode,corner,vdd_V,temp_C,stage" > results/run_trace.log
+
+  * --- Limits (tune to your target cell / load) ---
+  let trise_lim = 400p
+  let tfall_lim = 400p
+  let tphl_lim  = 400p
+  let tplh_lim  = 400p
+
+  * Sweeps
+  set tlist = ( -40 27 125 )
+  set vlist = ( 0.95 1.00 1.05 )
+
+  foreach vscale $vlist
+
+      let vrun_val = VDD_NOM * $vscale
+      let vmid = vrun_val / 2
+      let v10  = 0.1 * vrun_val
+      let v50  = 0.5 * vrun_val
+      let v90  = 0.9 * vrun_val
+
+      let voh_lim = 0.9 * vrun_val
+      let vol_lim = 0.1 * vrun_val
+
+      set vrun_sh = $&vrun_val
+
+      * Only alter VDD (safe). CORNER and SIM_MODE are static per run.
+      alterparam VDD = $&vrun_val
+      reset
+
+      foreach tval $tlist
+        set temp = $tval
+
+        echo "$mode_name,$cname,$vrun_sh,$tval,START" >> results/run_trace.log
+        let pass_flag = 1
+
+        *************************************************
+        * (A) DC VTC
+        *************************************************
+        alter @VBIAS[dc] = 0
+        dc VBIAS 0 $&vrun_val 0.01
+
+        * Defaults to avoid stale values if a meas fails
+        let vol=0 voh=0 vsw=0 vil=0 vih=0
+
+        meas dc vol MIN v(Vout)
+        meas dc voh MAX v(Vout)
+        meas dc vsw FIND v(Vin) WHEN v(Vout)=vmid
+        let gain = deriv(v(Vout))
+        meas dc vil FIND v(Vin) WHEN gain=-1 CROSS=1
+        meas dc vih FIND v(Vin) WHEN gain=-1 CROSS=2
+
+        if $&voh < $&voh_lim
+           let pass_flag = 0
+        end
+        if $&vol > $&vol_lim
+           let pass_flag = 0
+        end
+
+        * Capture to shell vars (echo-safe)
+        set r_voh = $&voh
+        set r_vol = $&vol
+        set r_vsw = $&vsw
+        set r_vil = $&vil
+        set r_vih = $&vih
+
+        remzerovec
+        write results/vtc_${mode_name}_${cname}_vdd${vrun_sh}_t${tval}.raw v(Vin) v(Vout)
+
+        *************************************************
+        * (B) TRAN
+        *************************************************
+        alter @VBIAS[dc] = 0
+        tran 20p 40n
+
+        let trise=999 tfall=999 tphl=999 tplh=999
+
+        meas tran trise TRIG v(Vout) VAL=$&v10 RISE=1 TARG v(Vout) VAL=$&v90 RISE=1
+        meas tran tfall TRIG v(Vout) VAL=$&v90 FALL=1 TARG v(Vout) VAL=$&v10 FALL=1
+        meas tran tphl  TRIG v(Vin)  VAL=$&v50 RISE=1 TARG v(Vout) VAL=$&v50 FALL=1
+        meas tran tplh  TRIG v(Vin)  VAL=$&v50 FALL=1 TARG v(Vout) VAL=$&v50 RISE=1
+
+        if $&trise > $&trise_lim
+           let pass_flag = 0
+        end
+        if $&tfall > $&tfall_lim
+           let pass_flag = 0
+        end
+        if $&tphl > $&tphl_lim
+           let pass_flag = 0
+        end
+        if $&tplh > $&tplh_lim
+           let pass_flag = 0
+        end
+
+        set r_trise = $&trise
+        set r_tfall = $&tfall
+        set r_tphl  = $&tphl
+        set r_tplh  = $&tplh
+
+        remzerovec
+        write results/tran_${mode_name}_${cname}_vdd${vrun_sh}_t${tval}.raw time v(Vin) v(Vout)
+
+        *************************************************
+        * (C) AC
+        *************************************************
+        alter @VBIAS[dc] = $&vmid
+        op
+        ac dec 50 10 10G
+
+        let a0_db=0
+        let ugf_val=0
+        let bw_val=0
+
+        meas ac a0_db MAX vdb(Vout)
+        meas ac ugf_val WHEN vdb(Vout)=0 CROSS=1
+        let target = a0_db - 3
+        meas ac bw_val WHEN vdb(Vout)=target CROSS=1
+
+        set r_a0  = $&a0_db
+        set r_ugf = $&ugf_val
+        set r_bw  = $&bw_val
+
+        remzerovec
+        write results/ac_${mode_name}_${cname}_vdd${vrun_sh}_t${tval}.raw frequency vdb(Vout) vp(Vout)
+
+        *************************************************
+        * (D) FINAL WRITE
+        *************************************************
+        echo "$mode_name,$cname,$vrun_sh,$tval,$r_voh,$r_vol,$r_vsw,$r_vil,$r_vih,$r_trise,$r_tfall,$r_tphl,$r_tplh,$r_a0,$r_ugf,$r_bw,$&pass_flag" >> results/summary.csv
+        echo "$mode_name,$cname,$vrun_sh,$tval,DONE" >> results/run_trace.log
+      end
+  end
+
+  echo "Simulations Completed."
+  quit
+.endc
+.end
